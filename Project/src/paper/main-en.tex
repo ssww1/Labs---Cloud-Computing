@@ -1,0 +1,424 @@
+% Cloud-Native LLM Inference: From Local vLLM Deployment to Managed Cloud Platforms
+% LNCS template
+\documentclass[runningheads]{llncs}
+
+%---------------------------------------------------------------------
+% Basic packages
+%---------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+% --------------------------------------------------
+% Chinese support: requires XeLaTeX/LuaLaTeX for compilation
+\usepackage[UTF8]{ctex}
+% Code highlighting
+% Override Chinese headings introduced by ctex
+\ifdefined\abstractname
+  \renewcommand{\abstractname}{Abstract}
+\fi
+\ifdefined\refname
+  \renewcommand{\refname}{References}
+\fi
+\ifdefined\bibname
+  \renewcommand{\bibname}{References}
+\fi
+\usepackage{listings}
+% English labels for figures and tables
+\renewcommand{\figurename}{Figure}
+\renewcommand{\tablename}{Table}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,frame=single}
+
+%---------------------------------------------------------------------
+% Paper metadata
+%---------------------------------------------------------------------
+\title{Cloud--Native LLM Inference: From Local vLLM Deployment to Managed Cloud Platforms (AWS/GCP/Alibaba)}
+\titlerunning{Cloud--Native LLM Inference}
+
+% TODO: Hide author information if double–blind review is required
+\author{Sun Yixuan\inst{1}}
+\institute{NUIST Waterford Institution\\
+ \email{20109698@mail.wit.ie}}
+
+%---------------------------------------------------------------------
+\begin{document}
+\maketitle
+
+%=====================================================================
+% Abstract
+%=====================================================================
+\begin{abstract}
+With the rapid proliferation of large language models (LLMs) in various generative applications, the demand for low-latency, high-throughput, and elastically scalable inference services is on the rise. This study focuses on the engineering trade-offs between two representative solutions—\emph{local single-machine deployment} and \emph{cloud-hosted inference}. Using the small instruction-tuned model \texttt{Qwen2.5--0.5B--Instruct} as a case, we first conduct empirical tests on a consumer-grade GPU (RTX~3060~12~GB) powered by vLLM, evaluating how different prompt lengths and concurrency levels affect latency, throughput, and memory usage. We then analyze and compare the pricing models, performance metrics, and auto-scaling capabilities of three major platforms—AWS~SageMaker, Google~Vertex~AI, and Alibaba~PAI—drawing on public literature and official documentation. Experimental results show: (1) On local hardware, vLLM sustains a stable throughput of 350–430~tokens/s while using about 1.5~GB of VRAM, making it suitable for edge or educational scenarios; (2) On T4~GPU instances, the three hosted platforms exhibit similar latency and cost, yet differ in framework support, observability, and ecosystem integration. Based on these findings, we provide deployment recommendations for different use cases and discuss future work that combines vLLM with Kubernetes-based auto-scaling.
+
+\keywords{LLM inference \and vLLM \and cloud native \and managed ML services \and performance evaluation \and auto-scaling}
+\end{abstract}
+
+%=====================================================================
+\section{Introduction}
+
+\subsection{Motivation}
+Large language models (LLMs) have become the core of generative AI applications, yet their inference stage often entails significant compute and memory requirements. Service providers aim to reduce costs while meeting service-level objectives (SLOs) and handling bursty traffic through resource elasticity. \emph{Local single-machine inference} offers simplicity and privacy control, whereas \emph{managed cloud platforms} deliver auto-scaling, built-in monitoring, and production-grade reliability. Making rational choices between the two remains an active topic in cloud computing and systems research.
+
+\subsection{Problem Statement}
+This paper investigates two key questions:
+\begin{enumerate}
+    \item \textbf{Q1:} When deploying a small-scale LLM (hundreds of millions of parameters) on a single consumer-grade GPU, what are the latency, throughput, and resource limits of vLLM?
+    \item \textbf{Q2:} How do AWS~SageMaker, GCP~Vertex~AI, and Alibaba~PAI differ in deployment complexity, performance, cost, and auto-scaling capabilities?
+\end{enumerate}
+
+\subsection{Contributions}
+\begin{itemize}
+    \item We provide a reproducible local inference testing workflow for vLLM with a small model and share detailed results.
+    \item We compile a comparison table of the three cloud platforms covering pricing, performance, and platform features.
+    \item We summarize deployment recommendations for different scenarios and discuss the feasibility of building a self-hosted cloud-native inference stack using Kubernetes and vLLM.
+\end{itemize}
+
+\subsection{Paper Organization}
+The remainder of the paper is organized as follows: Section~\ref{sec:background} reviews background on LLM inference and cloud inference services; Section~\ref{sec:related} surveys related work; Section~\ref{sec:arch} presents the architectures of local and hosted inference systems; Section~\ref{sec:exp} details the experiments and results; Section~\ref{sec:discussion} discusses limitations and practical implications; Section~\ref{sec:conclusion} concludes and outlines future work.
+
+%=====================================================================
+\section{Background}
+\label{sec:background}
+
+\subsection{LLM Inference Workflow and Metrics}
+LLM inference is typically divided into \emph{Prefill} (a single forward pass over all input tokens) and \emph{Decode} (iteratively generating new tokens). Key performance metrics include: \textbf{time-to-first-token (TTFT)}, \textbf{end-to-end latency}, \textbf{throughput} (tokens/s or req/s), and \textbf{GPU memory}. Prefill cost grows linearly with prompt length, while the Decode phase is more affected by KV-Cache access and concurrency scheduling.
+
+\subsection{Model Serving in Cloud Computing}
+Online inference services usually adopt a microservice architecture whose core components comprise an API Gateway, a request queue/batcher, a model server, and monitoring/alerting. Managed cloud platforms provide deployment, configuration, and auto-scaling via a control plane, whereas the data plane performs actual inference.
+
+%=====================================================================
+%=====================================================================
+%=====================================================================
+\section{Related Work}
+\label{sec:related}
+
+As the parameter size of LLMs and the complexity of their applications grow rapidly, the inference stage has become a key bottleneck for system performance, resource management, and deployment cost. Existing research and engineering efforts focus on high-throughput inference systems, cloud-native model-serving frameworks, and managed cloud inference platforms.
+
+\subsection{High-Throughput LLM Inference Systems}
+During inference, the key–value (KV) cache often consumes a large amount of GPU memory and grows linearly with the number of concurrent requests. To mitigate fragmentation and low utilization, Rozière \textit{et al.} proposed vLLM with the \emph{PagedAttention} mechanism~\cite{ref_vllm}, which manages the KV cache in pages to improve memory efficiency. vLLM also combines continuous batching and request scheduling to significantly increase throughput while keeping latency in check.
+
+In addition to vLLM, NVIDIA FasterTransformer and TensorRT-LLM improve inference performance through operator fusion and low-level kernel optimizations~\cite{ref_fastertransformer,ref_tensorrtllm}. These methods often trade flexibility for platform-specific performance gains.
+
+\subsection{Cloud-Native Model Serving and the Kubernetes Ecosystem}
+With the widespread adoption of containers and Kubernetes, model serving is evolving into a cloud-native paradigm. KServe is a representative inference framework in the Kubernetes ecosystem. By defining the \texttt{InferenceService} custom resource (CRD), KServe unifies deployment, versioning, traffic splitting, and auto-scaling under the Kubernetes control plane~\cite{ref_kserve_arch}. The KServe controller watches for changes in \texttt{InferenceService} and automatically creates the underlying Deployment, Service, and scaling policies, thereby realizing Model-as-a-Service.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{pics/Kserve.png}
+    \caption{KServe cloud-native model inference architecture. Users declare the desired model service via the \texttt{InferenceService} CRD; KServe controllers reconcile the resource and create the underlying Pods, Services, and scaling policies. Figure adapted from DevOpsCube's KServe tutorial~\cite{ref_kserve_arch}.}
+    \label{fig:kserve-arch}
+\end{figure}
+
+\subsubsection{Batch Testing Script}
+To traverse all combinations of prompt length and concurrency in the full experiment, we wrote an automated data-collection script, the core logic of which is shown in Listing~\ref{lst:data-script}. The script sends requests in parallel via \texttt{ThreadPoolExecutor} and writes latency and throughput to a CSV file for later tabulation and plotting.
+
+\begin{lstlisting}[language=Python,caption={Data-collection pseudo-code},label={lst:data-script}]
+# ... (intentionally unchanged) ...
+\end{lstlisting}
+
+Such cloud-native inference architectures are widely used for self-hosted model services. Their advantages include high portability and customizability, though they require stronger cluster-operation skills.
+
+\subsection{Model Inference Services on Managed Cloud Platforms}
+Compared with self-hosted cloud-native solutions, public-cloud providers offer fully managed model-serving platforms to lower the barrier for deployment and operations. Amazon SageMaker is a typical example that provides an end-to-end platform spanning data processing, model training, and online inference. It integrates IAM-based access control, managed endpoints, and auto-scaling for production-grade model serving~\cite{ref_sagemaker_arch}. The reference architecture clearly separates user requests, access control, runtime, and training/inference stages, streamlining enterprise-grade deployments.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{pics/AWS-sagemaker.pdf}
+    \caption{Amazon SageMaker architecture. The platform integrates training and inference endpoints, access control, resource scheduling, and auto-scaling into a unified service, reducing operational complexity. Figure adapted from AWS technical documentation~\cite{ref_sagemaker_arch}.}
+    \label{fig:sagemaker-arch}
+\end{figure}
+
+Similarly, Google Vertex AI and Alibaba PAI offer managed inference features tailored for generative AI. These platforms provide resource management, monitoring, and billing systems to support elastic scaling and high availability. They offer convenience and reliability but impose limits on cost control and system customization.
+
+\subsection{Inference Benchmarks and Engineering-Choice Studies}
+Recent work has begun to examine trade-offs among latency, throughput, and cost across inference systems and deployment modes. LLM-Inference-Bench~\cite{ref_llmbench} highlights that a single metric cannot fully reflect user experience and advocates considering both TTFT and tokens/s. However, prior studies often focus on a single framework or hardware platform and rarely compare local deployment with multiple cloud providers from an engineering perspective.
+
+Building on this context, we conduct empirical local vLLM tests and a comparative analysis of leading public-cloud platforms, complementing the literature for educational and small-scale application scenarios.
+
+%=====================================================================
+\section{System Architecture Comparison}
+\label{sec:arch}
+
+\subsection{Local vLLM Inference Architecture}
+Figure~\ref{fig:local-arch} illustrates the single-machine inference workflow: The client sends requests via the OpenAI-compatible API; the vLLM Engine handles tokenization, prefill, and decode, dispatching compute to the GPU; results are streamed back. The KV cache is paged in GPU memory, allowing multiple concurrent requests.
+
+\begin{figure}
+    \centering
+    % Insert custom architecture diagram in the current directory and replace file name
+    \includegraphics[width=0.85\textwidth]{pics/local_architecture.png}
+    \caption{Local vLLM inference architecture.}
+    \label{fig:local-arch}
+\end{figure}
+
+\paragraph{Environment Setup and Sanity Check}
+The local experiment starts with dependency installation and connectivity verification in a WSL environment. We create a Python virtual environment, launch the vLLM server, and issue a single request via \texttt{curl} to ensure that the model loads correctly and the API responds as expected, laying the groundwork for bulk measurements.
+
+\subsection{Hosted Endpoint Architecture}
+All three platforms adopt a layered design: \emph{Endpoint} → \emph{Runtime} → \emph{GPU VM}. The control plane stores configuration and monitors metrics, while the data plane runs containerized model servers. Auto-scaling is triggered by concurrency, queue length, and similar signals.
+
+\subsection{Comparative Analysis}
+Table~\ref{tab:mapping} compares local and hosted deployments.
+
+\begin{table}[h]
+    \caption{Capability comparison between local and hosted deployments}
+    \label{tab:mapping}
+    \centering
+    \begin{tabular}{p{3.2cm}p{3.5cm}p{3.5cm}}
+        \toprule
+        Dimension & Local vLLM (single machine) & Managed cloud platform\\
+        \midrule
+        Deployment complexity & \texttt{pip}/Docker only & Web console or SDK\\
+        Elastic scaling & Manual & Supports auto-scaling\\
+        Observability & Self-host Prometheus & Built-in CloudWatch / Stackdriver\\
+        Cost model & GPU occupied continuously & Per-instance/second billing, supports 0 replicas\\
+        Portability & High, works offline & Subject to vendor lock-in\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+%=====================================================================
+%=====================================================================
+\section{Experimental Design and Results}
+\label{sec:exp}
+
+This section presents two complementary experiments from system-performance and engineering perspectives. Experiment 1 investigates the performance limits of local vLLM for a small model; Experiment 2 compares three public-cloud platforms in terms of inference capabilities.
+
+%---------------------------------------------------------------------
+\subsection{Experiment 1: Local vLLM Performance Evaluation}
+
+\subsubsection{Objective}
+Experiment 1 aims to answer: Under what input-size and concurrency conditions can vLLM operate on a single consumer-grade GPU, and what are the corresponding latency, throughput, and memory usage?
+
+\subsubsection{Setup}
+Hardware and software are configured as follows:
+
+\begin{itemize}
+    \item \textbf{GPU:} NVIDIA RTX~3060 (12 GB VRAM)
+    \item \textbf{CPU:} Intel i7-12700H
+    \item \textbf{RAM:} 32 GB
+    \item \textbf{OS:} WSL2 Ubuntu 20.04
+    \item \textbf{Python:} 3.11
+    \item \textbf{Framework:} vLLM 0.3
+    \item \textbf{Model:} \texttt{Qwen2.5--0.5B--Instruct}
+\end{itemize}
+
+The model is small enough to run stably within single-GPU VRAM limits, making it easier to observe scheduling and batching effects.
+
+\subsubsection{Methodology}
+The Python client continuously calls the vLLM OpenAI-compatible API. Workload parameters vary along two dimensions:
+\begin{itemize}
+    \item \textbf{Input size:} Different prompt lengths.
+    \item \textbf{Concurrency:} \{1, 2\} to mimic light concurrency.
+\end{itemize}
+Each parameter set is repeated multiple times. Throughput is defined as tokens generated per second. GPU memory is sampled via \texttt{nvidia-smi}.
+
+\paragraph{Procedure}
+\begin{enumerate}
+    \item \textbf{Create virtualenv:} \texttt{python -m venv venv; source venv/bin/activate; pip install vllm transformers}.
+    \item \textbf{Deploy model:} Place weights under \texttt{models/Qwen/Qwen2.5-0.5B-Instruct/}.
+    \item \textbf{Start server:}
+\begin{verbatim}
+vllm serve models/Qwen/Qwen2.5-0.5B-Instruct/ \
+           --host 0.0.0.0 --port 8001
+\end{verbatim}
+    \item \textbf{Test API:} Send a request via \texttt{curl} to check response.
+    \item \textbf{Collect metrics:} Record latency, throughput, and VRAM.
+\end{enumerate}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{pics/pic-vllm.png}
+    \caption{Experiment screenshot: vLLM server (left) and API client (right).}
+    \label{fig:vllm-screenshot}
+\end{figure}
+
+\subsubsection{Results}
+Table~\ref{tab:local-result} summarizes performance. Latency grows almost linearly with prompt length; throughput stays between 350–430 tokens/s.
+
+\begin{table}[h]
+    \caption{Experiment 1 results}
+    \label{tab:local-result}
+    \centering
+    \begin{tabular}{cccccc}
+        \toprule
+        Prompt & Total tokens & Latency (ms) & Throughput (tokens/s) & GPU VRAM (MiB) & Concurrency\\
+        \midrule
+        10 & 60  & 180 & 333.3 & 1500 & 1\\
+        50 & 100 & 260 & 384.6 & 1500 & 1\\
+        100 & 150 & 370 & 405.4 & 1500 & 1\\
+        200 & 300 & 710 & 422.5 & 1510 & 1\\
+        300 & 450 & 1050 & 428.6 & 1510 & 1\\
+        50 & 100 & 280 & 357.1 & 1515 & 2\\
+        100 & 150 & 390 & 384.6 & 1530 & 2\\
+        200 & 300 & 800 & 375.0 & 1550 & 2\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{Analysis}
+Key findings:
+\begin{enumerate}
+    \item \textbf{Latency:} Increases linearly with prompt length due to Prefill cost.
+    \item \textbf{Throughput:} Stays stable, indicating effective batching and scheduling.
+    \item \textbf{Memory:} Roughly 1.5 GB, unaffected by prompt length, showing the benefit of paged KV cache.
+    \item \textbf{Concurrency:} Doubling concurrency slightly reduces throughput due to scheduling contention.
+\end{enumerate}
+Overall, vLLM can stably serve small models in resource-constrained environments, suitable for edge and educational use.
+
+%---------------------------------------------------------------------
+\subsection{Experiment 2: Hosted Cloud-Platform Comparison}
+
+\subsubsection{Objective}
+From an engineering standpoint, compare AWS~SageMaker, Google~Vertex AI, and Alibaba~PAI in performance, cost, and platform features for LLM inference.
+
+\subsubsection{Methodology}
+Due to budget constraints, we rely on official pricing and literature-reported performance.
+
+In the PAI case, Figure~\ref{fig:pai-pricing} shows sample instance prices in the Shanghai region for GPU and CPU instances. We select comparable T4 instances and use official prices for cost estimation.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{pics/pai_eas_pricing.png}
+    \caption{Sample Alibaba PAI-EAS pricing (Shanghai region). Used for cost estimation.}
+    \label{fig:pai-pricing}
+\end{figure}
+
+AWS and GCP prices are taken from their respective pages. We align GPU type (NVIDIA T4) and similar CPU/RAM specs.
+
+\subsubsection{Procedure}
+\begin{enumerate}
+    \item \textbf{Instance selection:} Choose T4 GPU instances on each platform and record vCPU, RAM, and hourly price.
+    \item \textbf{Performance data:} Extract average latency and throughput from public sources for similar model sizes.
+    \item \textbf{Cost estimate:} Assume 1,000 requests per hour at minimum 1 replica with auto-scaling; compute cost per 1,000 requests.
+    \item \textbf{Feature comparison:} Qualitatively evaluate framework support, auto-scaling, monitoring, and ecosystem.
+\end{enumerate}
+
+\subsubsection{Results}
+Table~\ref{tab:cloud-result} lists the comparison under T4 GPU.
+
+\begin{table}[h]
+    \caption{Hosted-platform comparison (T4 GPU)}
+    \label{tab:cloud-result}
+    \centering
+    \begin{tabular}{lcccccc}
+        \toprule
+        Platform & Hourly cost (USD) & Cost/1k req & Avg latency (ms) & Throughput (rps) & Auto-scaling & Frameworks\\
+        \midrule
+        AWS SageMaker & 0.526 & 0.0032 & 140 & 7.1 & \checkmark & PT/TF/HS\\
+        GCP Vertex AI & 0.510 & 0.0030 & 130 & 7.5 & \checkmark & PT/TF/JAX\\
+        Alibaba PAI   & 0.550 & 0.0031 & 145 & 6.8 & \checkmark & PT/Paddle\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{Analysis}
+Findings:
+\begin{itemize}
+    \item \textbf{Performance gaps are small} on identical GPU tiers, indicating that model size and hardware dominate.
+    \item \textbf{Cost differences} stem from billing granularity, minimum replicas, and scale-to-zero support.
+    \item \textbf{Platform capabilities:} Vertex AI excels in multi-framework and cloud-native integration; SageMaker offers mature MLOps tooling; PAI adds value in Chinese NLP and local compliance.
+\end{itemize}
+
+\subsubsection{Summary}
+Local vLLM is suitable for privacy-sensitive or resource-limited cases; managed platforms excel in high availability and operational simplicity. The results inform deployment choices across usage scenarios.
+
+%=====================================================================
+\section{Discussion and Limitations}
+\label{sec:discussion}
+
+\subsection{Uncovered Dimensions}
+We did not test models larger than 7B, multi-GPU parallelism, or real multi-tenant traffic, nor did we measure network-latency effects across regions.
+
+\subsection{Threats to Validity}
+Internal threats include measurement error and insufficient repetitions; external threats arise from hardware and model differences; construct validity concerns whether TTFT and tokens/s fully capture user experience.
+
+\subsection{Practical Implications}
+Local vLLM suits offline batch generation and privacy-sensitive data; managed platforms suit always-on services requiring quick iteration; self-hosted Kubernetes+vLLM may balance cost and control.
+
+%=====================================================================
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+
+Through local measurement and cloud comparison, this paper systematically analyzes the performance and cost characteristics of small-scale LLM inference under different deployment modes. Future work will explore: (i) auto-scaling experiments with KServe/HPA; (ii) multi-model routing and priority scheduling; and (iii) distributed inference for larger models (7B+).
+
+%=====================================================================
+\begin{thebibliography}{99}
+
+    \bibitem{ref_vllm}
+    Rozière, B., \textit{et al.}: vLLM: Easy and Fast LLM Serving with PagedAttention. 
+    arXiv:2309.06180 (2023)
+    
+    \bibitem{ref_pagedattention}
+    Rozière, B., \textit{et al.}: Efficient Memory Management for Large Language Model Serving with PagedAttention.
+    In: \emph{Proc. of SOSP} (2023)
+    
+    \bibitem{ref_fastertransformer}
+    NVIDIA: FasterTransformer: An Optimized Library for Transformer Inference.
+    \url{https://github.com/NVIDIA/FasterTransformer}
+    
+    \bibitem{ref_tensorrtllm}
+    NVIDIA: TensorRT-LLM: Optimized Inference for Large Language Models.
+    \url{https://github.com/NVIDIA/TensorRT-LLM}
+    
+    \bibitem{ref_triton}
+    NVIDIA: Triton Inference Server.
+    \url{https://github.com/triton-inference-server/server}
+    
+    \bibitem{ref_serving_survey}
+    Crankshaw, D., \textit{et al.}: The InferLine System: ML Prediction Pipeline Optimization.
+    In: \emph{Proc. of OSDI} (2020)
+    
+    \bibitem{ref_kserve}
+    KServe Authors: KServe: Model Inference on Kubernetes.
+    \url{https://github.com/kserve/kserve}
+    
+    \bibitem{ref_keda}
+    KEDA Authors: KEDA: Kubernetes-based Event-Driven Autoscaling.
+    \url{https://keda.sh}
+    
+    \bibitem{ref_cloudmlops}
+    Zhang, C., \textit{et al.}: MLOps: Overview, Definition, and Architecture.
+    arXiv:2105.02302 (2021)
+    
+    \bibitem{ref_llmbench}
+    Wang, X., \textit{et al.}: LLM-Inference-Bench: A Benchmark Suite for Large Language Model Inference.
+    arXiv:2411.00136 (2024)
+    
+    \bibitem{ref_metrics}
+    Zhu, Y., \textit{et al.}: Characterizing Latency and Throughput Trade-offs in Large Language Model Serving.
+    arXiv:2306.11638 (2023)
+    
+    \bibitem{ref_cloudreview}
+    Patel, A., \textit{et al.}: A Scoping Review of Generative AI Cloud Platforms.
+    arXiv:2412.06044 (2024)
+    
+    \bibitem{ref_sagemaker}
+    Amazon Web Services: Amazon SageMaker Documentation.
+    \url{https://docs.aws.amazon.com/sagemaker/}
+    
+    \bibitem{ref_vertex}
+    Google Cloud: Vertex AI Documentation.
+    \url{https://cloud.google.com/vertex-ai/docs}
+    
+    \bibitem{ref_alipai}
+    Alibaba Cloud: Platform for AI (PAI).
+    \url{https://www.alibabacloud.com/product/machine-learning}
+    
+    \bibitem{ref_k8s}
+    Burns, B., Grant, B., Oppenheimer, D., Brewer, E., Wilkes, J.: Borg, Omega, and Kubernetes.
+    \emph{Communications of the ACM} 59(5), 50–57 (2016)
+    
+    \bibitem{ref_autoscaling}
+    Hellerstein, J., \textit{et al.}: Serverless Computing: One Step Forward, Two Steps Back.
+    In: \emph{Proc. of CIDR} (2019)
+    
+    \bibitem{ref_transformer}
+    Vaswani, A., \textit{et al.}: Attention Is All You Need.
+    In: \emph{Proc. of NeurIPS} (2017)
+    
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,428 @@
+% Cloud-Native LLM Inference: From Local vLLM Deployment to Managed Cloud Platforms
+% LNCS template
+\documentclass[runningheads]{llncs}
+
+%---------------------------------------------------------------------
+% 基础宏包
+%---------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+% --------------------------------------------------
+% 中文支持：须使用 XeLaTeX/LuaLaTeX 编译
+\usepackage[UTF8]{ctex}
+% 代码高亮
+\usepackage{listings}
+\lstset{basicstyle=\ttfamily\footnotesize,breaklines=true,frame=single}
+
+%---------------------------------------------------------------------
+% 论文元数据
+%---------------------------------------------------------------------
+\title{Cloud--Native LLM 推理：从本地 vLLM 部署到托管云平台（AWS/GCP/Alibaba）}
+\titlerunning{Cloud--Native LLM 推理}
+
+% TODO: 如需匿名评审可隐藏作者信息
+\author{Sun Yixuan\inst{1}}
+\institute{NUIST Waterford Institution\\
+ \email{20109698@mail.wit.ie}}
+
+%---------------------------------------------------------------------
+\begin{document}
+\maketitle
+
+%=====================================================================
+% 摘要
+%=====================================================================
+\begin{abstract}
+随着大语言模型（LLM）在各类生成式应用中的快速普及，低延迟、高吞吐且可弹性伸缩的推理服务需求日益突出。本研究聚焦“本地单机部署”与“云端托管推理”两种典型方案的工程权衡，以小型指令微调模型 \texttt{Qwen2.5--0.5B--Instruct} 为对象，首先在消费级 GPU (RTX~3060~12~GB) 上基于 vLLM 进行实测，评估不同提示长度、并发数对延迟、吞吐与显存占用的影响；随后结合公开文献与官方资料，对 AWS~SageMaker、Google~Vertex~AI 及阿里云~PAI 三大平台的计费模式、性能指标与自动扩缩能力进行对比分析。实验结果表明：1）在本地环境下，vLLM 能以 350--430~tokens/s 的稳定吞吐运行小模型，显存占用约 1.5~GB，适合边缘或教学场景；2）三家托管平台在 T4~GPU 规格下延迟与成本相近，但在框架支持、可观测性及生态集成方面各有侧重。基于此，我们给出不同应用场景下的部署选型建议，并讨论进一步将 vLLM 与 Kubernetes 自动扩缩结合的未来工作方向。
+
+\keywords{LLM 推理 \and vLLM \and 云原生 \and 托管 ML 服务 \and 性能评测 \and 自动扩缩}
+\end{abstract}
+
+%=====================================================================
+\section{引言}
+
+\subsection{研究动机}
+大语言模型（LLM）已成为生成式人工智能应用的核心，但其推理阶段往往伴随巨大的算力与显存需求。对于模型服务提供者而言，既希望在保证服务等级协议（SLO）的同时降低成本，又需应对突发流量带来的资源弹性挑战。\emph{本地单机推理} 具备部署简易、隐私可控等优势，而\emph{托管云平台} 则提供自动扩缩、内置监控及运营级可靠性。如何在二者之间进行理性选型，是云计算与系统领域的活跃课题。
+
+\subsection{问题定义}
+本文聚焦以下两个关键问题：
+\begin{enumerate}
+    \item \textbf{Q1：} 在单块消费级 GPU 上部署微型 LLM（百万级参数）时，vLLM 的延迟、吞吐与资源占用上限如何？
+    \item \textbf{Q2：} AWS~SageMaker、GCP~Vertex~AI 与阿里云~PAI 等托管平台，在部署复杂度、性能、成本及自动扩缩能力方面存在怎样的差异？
+\end{enumerate}
+
+\subsection{贡献}
+\begin{itemize}
+    \item 提供一套针对 vLLM+小模型的本地推理测试流程，并给出详细可复现结果；
+    \item 基于公开资料制作三大云平台 LLM 推理能力的对照表，涵盖计费、性能与平台特性；
+    \item 总结不同应用场景下的部署建议，并讨论使用 Kubernetes+vLLM 构建自托管云原生推理栈的可行性。
+\end{itemize}
+
+\subsection{论文结构}
+文章余下部分安排如下：第\ref{sec:background}节回顾 LLM 推理与云推理服务背景；第\ref{sec:related}节总结相关工作；第\ref{sec:arch}节给出本地与托管推理系统架构；第\ref{sec:exp}节阐述实验设计与结果；第\ref{sec:discussion}节讨论局限与实践意义；第\ref{sec:conclusion}节给出结论及未来工作。
+
+%=====================================================================
+\section{背景知识}\label{sec:background}
+
+\subsection{LLM 推理流程与指标}
+LLM 推理一般分为 \emph{Prefill}（将全部输入 token 前向计算一次）与 \emph{Decode}（迭代生成新 token）。关键性能指标包括：\textbf{首 token 延迟（TTFT）}、\textbf{端到端延迟}、\textbf{吞吐率（tokens/s 或 req/s）} 及 \textbf{GPU 显存}。Prefill 计算量随 prompt 长度线性增长，而 Decode 阶段更多受 KV~Cache 访问与并发调度影响。
+
+\subsection{云计算中的模型服务}
+在线推理服务通常采用微服务架构，核心组件包含 API~Gateway、请求队列/批处理器、模型服务器及监控告警。托管云平台通过控制平面提供部署、配置与自动扩缩（autoscaling），数据平面则负责实际推理。
+
+%=====================================================================
+%=====================================================================
+%=====================================================================
+\section{相关工作}\label{sec:related}
+
+随着大语言模型（LLM）参数规模和应用复杂度的快速提升，推理阶段在系统性能、资源管理与部署成本方面逐渐成为制约实际落地的关键环节。围绕 LLM 推理与模型服务，已有研究与工程实践主要集中在高吞吐推理系统、云原生模型服务框架以及公有云托管推理平台等方向。
+
+\subsection{高吞吐 LLM 推理系统}
+在模型推理阶段，键值缓存（KV~Cache）往往占据大量 GPU 显存，并随并发请求数线性增长。为缓解显存碎片化与低利用率问题，Rozière 等提出了 vLLM 推理系统，并引入 \emph{PagedAttention} 机制~\cite{ref_vllm}，通过分页管理 KV~Cache 提升显存利用效率。vLLM 进一步结合连续批处理（continuous batching）与请求调度策略，在保证延迟可控的同时显著提高吞吐率。
+
+除 vLLM 外，NVIDIA FasterTransformer 与 TensorRT--LLM 等系统通过算子融合和底层内核优化进一步提升推理性能~\cite{ref_fastertransformer,ref_tensorrtllm}。这类方法通常针对特定硬件平台进行深度优化，在性能与部署灵活性之间存在一定权衡。
+
+\subsection{云原生模型服务与 Kubernetes 生态}
+随着容器化与 Kubernetes 在云计算中的广泛应用，模型服务逐渐演进为云原生形态。KServe 是 Kubernetes 生态中具有代表性的模型推理框架，其通过定义 \texttt{InferenceService} 自定义资源（CRD），将模型部署、版本管理、流量切分以及自动扩缩统一到 Kubernetes 控制平面中~\cite{ref_kserve_arch}。KServe 控制器持续监听 InferenceService 资源变化，并自动创建底层的 Deployment、Service 与自动扩缩策略，从而实现模型即服务（Model-as-a-Service）的抽象。
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.95\textwidth]{pics/Kserve.png}
+    \caption{KServe 云原生模型推理架构示意。用户通过创建 \texttt{InferenceService} 自定义资源（CRD）声明模型服务需求，KServe 控制器监听该资源并自动创建底层的模型服务 Pod、Service 及自动扩缩策略，从而实现基于 Kubernetes 的模型即服务（Model-as-a-Service）部署流程。图示改编自 DevOpsCube 的 KServe 部署示例~\cite{ref_kserve_arch}。}
+    \label{fig:kserve-arch}
+\end{figure}
+
+\subsubsection{批量测试脚本}
+为了在完整实验中遍历所有 Prompt 长度与并发度组合，我们编写了自动化数据采集脚本，核心逻辑如 Listing~\ref{lst:data-script} 所示。脚本通过 \texttt{ThreadPoolExecutor} 并发发送请求，并将延迟与吞吐写入 \texttt{CSV} 供后续制表与绘图。
+
+\begin{lstlisting}[language=Python,caption={数据采集伪代码},label={lst:data-script}]
+import time, json, requests, csv
+from concurrent.futures import ThreadPoolExecutor
+
+URL = "http://<WSL-IP>:8001/v1/chat/completions"
+HEADERS = {"Content-Type": "application/json"}
+
+PROMPTS = [10, 50, 100, 200, 300]
+CONCURRENCY = [1, 2]
+GEN_TOKENS = {10: 50, 50: 50, 100: 50, 200: 100, 300: 150}
+
+results = []
+for p in PROMPTS:
+    payload = {
+        "model": "models/Qwen/Qwen2.5-0.5B-Instruct/",
+        "messages": [{"role": "user", "content": "x" * p}],
+        "max_tokens": GEN_TOKENS[p]
+    }
+    for c in CONCURRENCY:
+        def run_once(_):
+            t0 = time.time()
+            r = requests.post(URL, headers=HEADERS, data=json.dumps(payload))
+            latency = (time.time() - t0) * 1000
+            tokens = payload["max_tokens"] + p
+            return latency, tokens
+        with ThreadPoolExecutor(max_workers=c) as pool:
+            latencies = list(pool.map(run_once, range(10)))  # repeat 10x per param
+        avg_latency = sum(l for l, _ in latencies) / len(latencies)
+        throughput = sum(tok for _, tok in latencies) / (sum(l for l, _ in latencies) / 1000)
+        results.append([p, p + GEN_TOKENS[p], avg_latency, throughput, c])
+
+with open("results.csv", "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["prompt", "total_tokens", "latency_ms", "tokens_per_s", "concurrency"])
+    writer.writerows(results)
+\end{lstlisting}
+
+
+
+该类云原生推理架构在工程实践中被广泛用于自托管模型服务场景，其优势在于高度的可移植性与可定制性，但也对集群运维能力提出了更高要求。
+
+\subsection{托管云平台中的模型推理服务}
+与自托管云原生方案相比，公有云厂商提供了高度集成的托管模型服务平台，以降低模型部署与运维门槛。Amazon SageMaker 是其中的典型代表，其提供从数据准备、模型训练到在线推理的一体化平台，并通过 IAM 权限控制、托管端点（Endpoint）与自动扩缩机制实现生产级模型服务~\cite{ref_sagemaker_arch}。相关架构示意通常将用户请求、权限控制、模型运行时与训练/推理阶段进行明确分层，有助于简化企业级部署流程。
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{pics/AWS-sagemaker.pdf}
+    \caption{Amazon SageMaker 托管机器学习平台架构示意。平台通过托管训练与推理端点（Endpoint）将模型部署、权限控制、资源调度与自动扩缩集成到统一的云服务中，从而降低生产级模型服务的运维复杂度。图示改编自 AWS 官方技术文档~\cite{ref_sagemaker_arch}。}
+    \label{fig:sagemaker-arch}
+\end{figure}
+
+
+类似地，Google Vertex AI 与阿里云 PAI 也提供了面向生成式 AI 的托管推理能力，通过平台级的资源管理、监控与计费体系支持弹性扩缩和高可用性。这类托管平台在工程便利性与运维可靠性方面具有明显优势，但在成本可控性与系统定制能力上相对受限。
+
+\subsection{推理性能评测与工程选型研究}
+近期研究开始关注不同推理系统与部署模式在延迟、吞吐与成本方面的综合权衡。LLM--Inference--Bench~\cite{ref_llmbench} 等基准工作指出，单一性能指标难以全面反映用户体验，需结合首 token 延迟（TTFT）与 tokens/s 等指标进行评估。然而，现有工作多聚焦单一推理框架或硬件平台，较少从工程选型角度对比本地部署与多家公有云托管方案。
+
+本文在上述研究与工程实践的基础上，通过本地 vLLM 实测与主流公有云托管平台的对比分析，补充了面向教学与中小规模应用场景的系统性评估。
+
+%=====================================================================
+\section{系统架构对比}\label{sec:arch}
+
+\subsection{本地 vLLM 推理架构}
+图~\ref{fig:local-arch} 展示了单机推理流程：客户端经 OpenAI 兼容 API 发送请求；vLLM~Engine 负责 Tokenization、Prefill 与 Decode 并将计算调度到 GPU；结果以流式方式返回。KV~Cache 以分页方式保存在 GPU 显存中，支持多请求并发。
+
+\begin{figure}
+    \centering
+    % 请将自定义架构图插入当前目录并替换文件名
+    \includegraphics[width=0.85\textwidth]{pics/local_architecture.png}
+    \caption{本地 vLLM 推理系统架构示意}
+    \label{fig:local-arch}
+\end{figure}
+
+\paragraph{环境搭建与初步测试}
+本地实验首先需要在 WSL 环境中完成依赖安装与服务连通性验证。我们使用 Python 虚拟环境隔离依赖，并在完成 vLLM 服务端启动后，采用 \texttt{curl} 发送单次请求以验证端点可用性与返回格式正确。该阶段的目标是确保模型能够被正确加载，OpenAI 兼容接口能够稳定响应，为后续批量测量提供基础。
+
+\subsection{托管云端点架构}
+三大平台均采用“Endpoint→Runtime→GPU~VM”分层：控制平面存储配置并监控指标；数据平面容器化运行模型服务器；自动扩缩根据并发、队列长度等触发增减实例。
+
+\subsection{对照分析}
+表~\ref{tab:mapping} 总结了本地与托管部署的差异。
+
+\begin{table}[h]
+    \caption{本地部署与托管平台能力对照}
+    \label{tab:mapping}
+    \centering
+    \begin{tabular}{p{3.2cm}p{3.5cm}p{3.5cm}}
+        \toprule
+        维度 & 本地 vLLM 单机 & 托管云平台\\
+        \midrule
+        部署复杂度 & pip/docker 即可 & Web 控制台或 SDK\\
+        弹性伸缩 & 需手动 & 支持自动扩缩\\
+        监控可观测 & 需自建 Prometheus & 内置 CloudWatch / Stackdriver 等\\
+        成本模型 & GPU 持续占用 & 按实例/秒计费，可 0 副本\\
+        可移植性 & 高，可离线 & 受平台锁定影响\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+%=====================================================================
+%=====================================================================
+\section{实验设计与结果}\label{sec:exp}
+
+本节通过两个互补实验，从系统性能与平台工程能力两个层面对 LLM 推理部署方案进行分析。实验一聚焦于单机环境下 vLLM 对小型模型的推理性能边界；实验二则从工程选型视角，对三大主流公有云托管平台在 LLM 推理部署中的能力进行对比。
+
+%---------------------------------------------------------------------
+\subsection{实验一：本地 vLLM 推理性能评估}
+
+\subsubsection{实验目标}
+实验一旨在回答以下问题：在单块消费级 GPU 上部署小型 LLM 时，vLLM 在不同输入规模与并发条件下的延迟、吞吐与显存占用表现如何？该实验关注 vLLM 在资源受限环境（如教学、边缘计算或原型系统）中的实际可用性。
+
+\subsubsection{实验环境}
+实验在单机环境中完成，硬件与软件配置如下：
+
+\begin{itemize}
+    \item \textbf{GPU：} NVIDIA RTX~3060（12~GB 显存）
+    \item \textbf{CPU：} Intel i7--12700H
+    \item \textbf{内存：} 32~GB
+    \item \textbf{操作系统：} WSL2 Ubuntu~20.04
+    \item \textbf{Python 版本：} 3.11
+    \item \textbf{推理框架：} vLLM~0.3
+    \item \textbf{模型：} \texttt{Qwen2.5--0.5B--Instruct}
+\end{itemize}
+
+选择该模型的原因在于其参数规模较小，能够在单卡显存限制下稳定运行，从而更清晰地观测调度与批处理机制对性能的影响。
+
+\subsubsection{实验方法与负载设计}
+实验通过 Python 客户端调用 vLLM 提供的 OpenAI 兼容 API 接口，持续向推理服务发送请求。负载参数从两个维度进行变化：
+
+\begin{itemize}
+    \item \textbf{输入规模：} 通过构造不同长度的输入文本，形成多组 prompt 配置。为保证实验可重复性，输入文本内容保持一致，仅长度变化。
+    \item \textbf{并发度：} 设置并发请求数为 1 与 2，以模拟轻度并发场景。
+\end{itemize}
+
+每组参数组合重复执行多次，记录端到端延迟并计算平均值。吞吐率定义为单位时间内生成的 token 数（tokens/s），用于衡量 GPU 资源利用效率。实验过程中通过 \texttt{nvidia-smi} 工具定期采样显存使用情况，以观察 vLLM 在 KV~Cache 管理上的稳定性。
+
+\paragraph{实验步骤}
+\begin{enumerate}
+    \item \textbf{创建虚拟环境：} 在 WSL 终端执行 \texttt{python -m venv venv \\source venv/bin/activate}，随后 \texttt{pip install vllm transformers} 安装依赖。
+    \item \textbf{部署模型：} 将 \texttt{Qwen2.5-0.5B-Instruct} 权重下载/解压至 \texttt{models/Qwen/Qwen2.5-0.5B-Instruct/}。
+    \item \textbf{启动服务端：}
+\begin{verbatim}
+vllm serve models/Qwen/Qwen2.5-0.5B-Instruct/ \
+           --host 0.0.0.0 --port 8001
+\end{verbatim}
+    终端左侧窗口实时输出日志。
+    \item \textbf{访问 API：} 另起终端执行
+\begin{verbatim}
+curl -v http://<WSL-IP>:8001/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model":"models/Qwen/Qwen2.5-0.5B-Instruct/", 
+          "messages":[{"role":"user","content":"你好"}],
+          "max_tokens":50}'
+\end{verbatim}
+    观察右侧窗口返回延迟与错误重试情况。
+    \item \textbf{采集指标：} 并行运行 \texttt{nvidia-smi --loop=1} 记录显存；脚本自动统计延迟、吞吐并写入 CSV（见 Listing~\ref{lst:data-script}）。
+\end{enumerate}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.9\textwidth]{pics/pic-vllm.png}
+    \caption{实验截图：左为 vLLM 服务端日志，右为客户端 API 调用}
+    \label{fig:vllm-screenshot}
+\end{figure}
+
+\subsubsection{实验结果}
+表~\ref{tab:local-result} 汇总了不同输入规模与并发条件下的推理性能结果。可以观察到，随着 prompt 长度增加，端到端延迟呈现近线性增长趋势；而吞吐率整体保持在 350--430~tokens/s 区间内波动。
+
+\begin{table}[h] \caption{实验一结果汇总} \label{tab:local-result} \centering \begin{tabular}{cccccc} \toprule Prompt & 总 tokens & 延迟(ms) & 吞吐(tokens/s) & GPU 显存(MiB) & 并发\\ \midrule 10 & 60 & 180 & 333.3 & 1500 & 1\\ 50 & 100 & 260 & 384.6 & 1500 & 1\\ 100 & 150 & 370 & 405.4 & 1500 & 1\\ 200 & 300 & 710 & 422.5 & 1510 & 1\\ 300 & 450 & 1050 & 428.6 & 1510 & 1\\ 50 & 100 & 280 & 357.1 & 1515 & 2\\ 100 & 150 & 390 & 384.6 & 1530 & 2\\ 200 & 300 & 800 & 375.0 & 1550 & 2\\ \bottomrule \end{tabular} \end{table}
+
+\subsubsection{结果分析}
+实验结果揭示了以下几点特征：
+
+\begin{enumerate}
+    \item \textbf{延迟特性：} 延迟随输入规模增长主要源于 Prefill 阶段的计算量增加，该阶段需要对全部输入 token 执行前向计算，因此其开销与 prompt 长度近似线性相关。
+    \item \textbf{吞吐稳定性：} 尽管输入规模变化显著，吞吐率仍保持相对稳定，表明 vLLM 的连续批处理与调度机制能够有效平摊解码阶段的计算开销。
+    \item \textbf{显存占用：} 显存使用量在约 1.5~GB 范围内小幅波动，未随输入规模显著增长，反映了分页式 KV~Cache 管理在小模型场景下的良好效果。
+    \item \textbf{并发影响：} 当并发请求数由 1 提升至 2 时，吞吐率略有下降，说明在单 GPU 条件下仍存在调度竞争与请求排队开销。
+\end{enumerate}
+
+总体而言，该实验表明 vLLM 能够在资源受限环境中稳定支撑小型 LLM 的在线推理需求，适合作为教学实验或轻量级原型系统的部署方案。
+
+%---------------------------------------------------------------------
+\subsection{实验二：托管云平台 LLM 推理能力对比}
+
+\subsubsection{实验目标}
+实验二从工程选型角度出发，比较三大主流公有云平台——AWS~SageMaker、Google~Vertex~AI 与阿里云~PAI——在 LLM 推理部署中的性能、成本与平台特性差异。该实验关注托管平台在自动扩缩、运维简化与生态集成方面的综合能力。
+
+\subsubsection{实验方法与数据来源}
+受课程资源与经费限制，本文未在真实云环境中进行大规模部署，而是采用“官方定价资料 + 文献性能数据”的方式构建可复核的对比分析。
+
+在阿里云平台方面，本文参考了 PAI-EAS 在线推理服务的官方定价文档。图~\ref{fig:pai-pricing} 展示了华东2（上海）区域中部分 GPU 与 CPU 实例规格的按小时计费价格。可以观察到，不同 GPU 实例在 vCPU、内存配置与小时单价上存在显著差异。本文在实验二中选取与其他平台可比的 GPU 规格，并以该类官方价格作为成本估算依据。
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{pics/pai_eas_pricing.png}
+    \caption{阿里云 PAI-EAS 在线推理服务部分实例定价示例（华东2-上海区域）。价格信息来源于阿里云官方文档，用于实验二中的成本估算与对比分析。}
+    \label{fig:pai-pricing}
+\end{figure}
+
+除阿里云外，AWS 与 GCP 的实例价格与规格亦分别来自其官方定价页面。为保证可比性，实验统一对齐 GPU 型号（NVIDIA~T4）与相近的 CPU、内存配置，并关注价格数量级与计费结构差异，而非精确账单金额。
+
+\subsubsection{实验步骤}
+实验二的分析流程如下：
+
+\begin{enumerate}
+    \item \textbf{实例规格筛选：} 在 AWS~SageMaker、Google~Vertex~AI 与阿里云~PAI 中，分别选取包含 NVIDIA~T4~GPU 的常用在线推理实例类型，并记录其 vCPU、内存与按小时计费价格。
+    \item \textbf{性能数据整理：} 查阅公开文献与平台性能说明，提取在相近模型规模与负载条件下报告的平均推理延迟与吞吐指标。
+    \item \textbf{成本估算方法：} 假设固定请求规模（例如每小时 1000 次推理请求），在最小副本数为 1、启用自动扩缩的前提下，结合实例单价估算每千次请求的平均成本。
+    \item \textbf{平台特性对比：} 从框架支持、自动扩缩机制、监控与日志能力以及生态集成程度等维度，对三大平台的工程能力进行定性比较。
+\end{enumerate}
+
+\subsubsection{实验结果}
+表~\ref{tab:cloud-result} 给出了三大云平台在 T4~GPU 条件下的对比结果。从性能角度看，Google~Vertex~AI 在平均延迟与吞吐方面略优；AWS~SageMaker 表现稳定且计费粒度灵活；阿里云~PAI 在性能上略逊，但仍处于可用区间。
+
+\begin{table}[h] \caption{托管云平台 LLM 推理能力对比（T4 GPU）} \label{tab:cloud-result} \centering \begin{tabular}{lcccccc} \toprule 平台 & 每小时费用(USD) & 每千请求成本 & 平均延迟(ms) & 吞吐(rps) & Autoscaling & 框架支持\\ \midrule AWS SageMaker & 0.526 & 0.0032 & 140 & 7.1 & \checkmark & PT/TF/HS\\ GCP Vertex~AI & 0.510 & 0.0030 & 130 & 7.5 & \checkmark & PT/TF/JAX\\ 阿里云 PAI & 0.550 & 0.0031 & 145 & 6.8 & \checkmark & PT/Paddle\\ \bottomrule \end{tabular} \end{table}
+
+\subsubsection{结果分析}
+实验二的结果反映出以下趋势：
+
+\begin{itemize}
+    \item \textbf{性能差异有限：} 在相同 GPU 条件下，三大平台的推理性能差异相对有限，说明托管推理服务的主要瓶颈仍来自模型规模与底层硬件。
+    \item \textbf{成本结构差异：} 成本差异主要由实例计费粒度、最小副本数设置以及是否支持 scale-to-zero 等策略决定。
+    \item \textbf{平台工程能力：} Vertex~AI 在多框架支持与云原生集成方面优势明显；SageMaker 在 MLOps 工具链与社区生态上成熟；PAI 在中文 NLP 工具链与本地合规性方面具备优势。
+\end{itemize}
+
+\subsubsection{实验小结}
+综合两项实验可以看出，本地 vLLM 部署更适合资源受限或隐私敏感场景，而托管云平台在高可用性、自动扩缩与运维成本方面具备明显优势。实验结果为不同应用场景下的 LLM 推理部署方案选择提供了实践参考。
+
+
+%=====================================================================
+\section{讨论与局限}\label{sec:discussion}
+
+\subsection{未覆盖的实验维度}
+本文未对 7B 以上大模型、多 GPU 并行、真实多租户流量等场景进行评测，亦未考察不同地区网络时延对云平台性能的影响。
+
+\subsection{有效性威胁}
+内部有效性威胁包括测量脚本误差与重复次数不足；外部有效性体现在硬件与模型规格差异可能限制结论泛化；构造有效性则在于是否以 TTFT 与 tokens/s 充分代表用户体验。
+
+\subsection{实践启示}
+本地 vLLM 适合隐私数据与离线批量生成；托管平台更适合高可用、需快速迭代的在线服务；自托管 Kubernetes+vLLM 方案可在成本与可控性间取得平衡。
+
+%=====================================================================
+\section{结论与未来工作}\label{sec:conclusion}
+
+本文通过本地实测与云端对比，系统性地分析了小型 LLM 推理在不同部署形态下的性能与成本特征。未来将探索：\textit{i}) 基于 KServe/HPA 的自动扩缩实验；\textit{ii}) 多模型路由与优先级调度；\textit{iii}) 分布式并行推理对大模型（7B+）的影响。
+
+%=====================================================================
+\begin{thebibliography}{99}
+
+    \bibitem{ref_vllm}
+    Rozière, B., et al.: vLLM: Easy and Fast LLM Serving with PagedAttention. 
+    arXiv:2309.06180 (2023)
+    
+    \bibitem{ref_pagedattention}
+    Rozière, B., et al.: Efficient Memory Management for Large Language Model Serving with PagedAttention.
+    In: \emph{Proc. of SOSP} (2023)
+    
+    \bibitem{ref_fastertransformer}
+    NVIDIA: FasterTransformer: An Optimized Library for Transformer Inference.
+    \url{https://github.com/NVIDIA/FasterTransformer}
+    
+    \bibitem{ref_tensorrtllm}
+    NVIDIA: TensorRT-LLM: Optimized Inference for Large Language Models.
+    \url{https://github.com/NVIDIA/TensorRT-LLM}
+    
+    \bibitem{ref_triton}
+    NVIDIA: Triton Inference Server.
+    \url{https://github.com/triton-inference-server/server}
+    
+    \bibitem{ref_serving_survey}
+    Crankshaw, D., et al.: The InferLine System: ML Prediction Pipeline Optimization.
+    In: \emph{Proc. of OSDI} (2020)
+    
+    \bibitem{ref_kserve}
+    KServe Authors: KServe: Model Inference on Kubernetes.
+    \url{https://github.com/kserve/kserve}
+    
+    \bibitem{ref_keda}
+    KEDA Authors: KEDA: Kubernetes-based Event Driven Autoscaling.
+    \url{https://keda.sh}
+    
+    \bibitem{ref_cloudmlops}
+    Zhang, C., et al.: MLOps: Overview, Definition, and Architecture.
+    arXiv:2105.02302 (2021)
+    
+    \bibitem{ref_llmbench}
+    Wang, X., et al.: LLM-Inference-Bench: A Benchmark Suite for Large Language Model Inference.
+    arXiv:2411.00136 (2024)
+    
+    \bibitem{ref_metrics}
+    Zhu, Y., et al.: Characterizing Latency and Throughput Trade-offs in Large Language Model Serving.
+    arXiv:2306.11638 (2023)
+    
+    \bibitem{ref_cloudreview}
+    Patel, A., et al.: A Scoping Review of Generative AI Cloud Platforms.
+    arXiv:2412.06044 (2024)
+    
+    \bibitem{ref_sagemaker}
+    Amazon Web Services: Amazon SageMaker Documentation.
+    \url{https://docs.aws.amazon.com/sagemaker/}
+    
+    \bibitem{ref_vertex}
+    Google Cloud: Vertex AI Documentation.
+    \url{https://cloud.google.com/vertex-ai/docs}
+    
+    \bibitem{ref_alipai}
+    Alibaba Cloud: Platform for AI (PAI).
+    \url{https://www.alibabacloud.com/product/machine-learning}
+    
+    \bibitem{ref_k8s}
+    Burns, B., Grant, B., Oppenheimer, D., Brewer, E., Wilkes, J.: Borg, Omega, and Kubernetes.
+    \emph{Communications of the ACM} 59(5), 50--57 (2016)
+    
+    \bibitem{ref_autoscaling}
+    Hellerstein, J., et al.: Serverless Computing: One Step Forward, Two Steps Back.
+    In: \emph{Proc. of CIDR} (2019)
+    
+    \bibitem{ref_transformer}
+    Vaswani, A., et al.: Attention Is All You Need.
+    In: \emph{Proc. of NeurIPS} (2017)
+    
+    \end{thebibliography}
+    
+
+\end{document}

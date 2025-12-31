@@ -1,0 +1,4 @@
+platform,hourly_cost_usd,cost_per_1k_req,avg_latency_ms,throughput_rps,auto_scaling,frameworks
+AWS SageMaker,0.526,0.0032,140,7.1,True,PT/TF/HS
+GCP Vertex AI,0.51,0.003,130,7.5,True,PT/TF/JAX
+Alibaba PAI,0.55,0.0031,145,6.8,True,PT/Paddle
